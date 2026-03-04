@@ -1,0 +1,266 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Desenho com Gestos da Mão">
+  <section class="space-y-4">
+    <h1>Desenho com câmera e gestos</h1>
+    <p>
+      Faça <strong>1</strong> com a mão para ativar o lápis, abra a mão para ativar o modo
+      <strong>ERASER</strong> e use <strong>2, 3 ou 4</strong> dedos para trocar a cor.
+    </p>
+
+    <div class="controls">
+      <button id="start-camera" class="btn">Iniciar câmera</button>
+      <span id="mode">Modo: aguardando câmera...</span>
+      <span id="color">Cor: preto</span>
+    </div>
+
+    <div class="stage" id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="draw-layer"></canvas>
+      <canvas id="overlay-layer"></canvas>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <script is:inline>
+    const videoEl = document.getElementById('video');
+    const drawCanvas = document.getElementById('draw-layer');
+    const overlayCanvas = document.getElementById('overlay-layer');
+    const stageEl = document.getElementById('stage');
+    const startButton = document.getElementById('start-camera');
+    const modeEl = document.getElementById('mode');
+    const colorEl = document.getElementById('color');
+
+    const drawCtx = drawCanvas.getContext('2d');
+    const overlayCtx = overlayCanvas.getContext('2d');
+
+    const COLORS = {
+      2: '#ef4444',
+      3: '#22c55e',
+      4: '#3b82f6'
+    };
+
+    let currentColor = '#000000';
+    let mode = 'idle';
+    let previousPoint = null;
+
+    const updateMode = (nextMode) => {
+      if (mode !== nextMode) {
+        mode = nextMode;
+        modeEl.textContent = `Modo: ${nextMode}`;
+      }
+    };
+
+    const updateColor = (nextColor) => {
+      if (currentColor !== nextColor) {
+        currentColor = nextColor;
+        colorEl.textContent = `Cor: ${nextColor}`;
+      }
+    };
+
+    const resizeCanvases = () => {
+      const width = videoEl.videoWidth || 960;
+      const height = videoEl.videoHeight || 720;
+      for (const canvas of [drawCanvas, overlayCanvas]) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      stageEl.style.aspectRatio = `${width} / ${height}`;
+    };
+
+    const fingerUp = (landmarks, tip, pip) => landmarks[tip].y < landmarks[pip].y;
+
+    const thumbUp = (landmarks) => {
+      const thumbTip = landmarks[4];
+      const thumbIp = landmarks[3];
+      return Math.abs(thumbTip.x - thumbIp.x) > 0.03;
+    };
+
+    const countRaisedFingers = (landmarks) => {
+      let count = 0;
+      if (fingerUp(landmarks, 8, 6)) count += 1;
+      if (fingerUp(landmarks, 12, 10)) count += 1;
+      if (fingerUp(landmarks, 16, 14)) count += 1;
+      if (fingerUp(landmarks, 20, 18)) count += 1;
+      return count;
+    };
+
+    const isOpenPalm = (landmarks) => {
+      const fourFingersUp =
+        fingerUp(landmarks, 8, 6) &&
+        fingerUp(landmarks, 12, 10) &&
+        fingerUp(landmarks, 16, 14) &&
+        fingerUp(landmarks, 20, 18);
+
+      return fourFingersUp && thumbUp(landmarks);
+    };
+
+    const toCanvasPoint = (landmark) => ({
+      x: (1 - landmark.x) * drawCanvas.width,
+      y: landmark.y * drawCanvas.height
+    });
+
+    const drawStroke = (point) => {
+      if (!previousPoint) {
+        previousPoint = point;
+        return;
+      }
+      drawCtx.strokeStyle = currentColor;
+      drawCtx.lineWidth = 5;
+      drawCtx.lineJoin = 'round';
+      drawCtx.lineCap = 'round';
+      drawCtx.beginPath();
+      drawCtx.moveTo(previousPoint.x, previousPoint.y);
+      drawCtx.lineTo(point.x, point.y);
+      drawCtx.stroke();
+      previousPoint = point;
+    };
+
+    const eraseAt = (point) => {
+      drawCtx.save();
+      drawCtx.globalCompositeOperation = 'destination-out';
+      drawCtx.beginPath();
+      drawCtx.arc(point.x, point.y, 32, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.restore();
+    };
+
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults((results) => {
+      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+      if (!results.multiHandLandmarks?.length) {
+        previousPoint = null;
+        updateMode('sem mão detectada');
+        return;
+      }
+
+      const landmarks = results.multiHandLandmarks[0];
+      drawConnectors(overlayCtx, landmarks, HAND_CONNECTIONS, { color: '#ffffff', lineWidth: 2 });
+      drawLandmarks(overlayCtx, landmarks, { color: '#f59e0b', lineWidth: 1, radius: 3 });
+
+      const fingers = countRaisedFingers(landmarks);
+      if (COLORS[fingers]) {
+        updateColor(COLORS[fingers]);
+      }
+
+      if (isOpenPalm(landmarks)) {
+        updateMode('ERASER');
+        const palmPoint = toCanvasPoint(landmarks[9]);
+        eraseAt(palmPoint);
+        previousPoint = null;
+        return;
+      }
+
+      if (fingers === 1) {
+        updateMode('LÁPIS');
+        drawStroke(toCanvasPoint(landmarks[8]));
+      } else {
+        updateMode('gesto detectado');
+        previousPoint = null;
+      }
+    });
+
+    startButton.addEventListener('click', async () => {
+      startButton.disabled = true;
+      modeEl.textContent = 'Modo: iniciando câmera...';
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 960, height: 720 } });
+        videoEl.srcObject = stream;
+
+        videoEl.addEventListener(
+          'loadeddata',
+          () => {
+            resizeCanvases();
+          },
+          { once: true }
+        );
+
+        const camera = new Camera(videoEl, {
+          onFrame: async () => {
+            await hands.send({ image: videoEl });
+          },
+          width: 960,
+          height: 720
+        });
+
+        await camera.start();
+        updateMode('pronto');
+      } catch (error) {
+        console.error(error);
+        startButton.disabled = false;
+        updateMode('erro ao iniciar câmera');
+      }
+    });
+
+    window.addEventListener('resize', resizeCanvases);
+  </script>
+
+  <style>
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .stage {
+      position: relative;
+      width: min(100%, 960px);
+      border-radius: 1rem;
+      overflow: hidden;
+      border: 1px solid #334155;
+      background: #0f172a;
+    }
+
+    #video,
+    #draw-layer,
+    #overlay-layer {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      inset: 0;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    #video {
+      opacity: 0.35;
+    }
+
+    #draw-layer {
+      z-index: 2;
+    }
+
+    #overlay-layer {
+      z-index: 3;
+      pointer-events: none;
+    }
+
+    .stage::before {
+      content: '';
+      display: block;
+      padding-top: 75%;
+    }
+
+    #mode,
+    #color {
+      font-weight: 700;
+    }
+  </style>
+</Layout>
